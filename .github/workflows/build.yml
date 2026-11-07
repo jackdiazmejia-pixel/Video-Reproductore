@@ -1,0 +1,1243 @@
+name: Build Video Flotante
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Limpiar proyecto viejo
+        run: |
+          rm -rf app build.gradle.kts settings.gradle.kts gradle.properties
+
+      - name: Aceptar licencias de Android SDK
+        run: |
+          sudo mkdir -p $ANDROID_HOME/licenses
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" | sudo tee $ANDROID_HOME/licenses/android-sdk-license > /dev/null
+          echo "84831b9409646a918e30573bab4c9c91346d8abd" | sudo tee $ANDROID_HOME/licenses/android-sdk-preview-license > /dev/null
+
+      - name: Crear archivos de configuracion de Gradle
+        run: |
+          mkdir -p app/src/main/java/com/multimediaplayer
+          mkdir -p app/src/main/res/values
+
+          cat << 'EOF' > gradle.properties
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "VideoFlotante"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.multimediaplayer"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.multimediaplayer"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release { isMinifyEnabled = false }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+
+          dependencies {
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.recyclerview:recyclerview:1.3.2")
+              implementation("com.google.android.material:material:1.12.0")
+              implementation("com.github.bumptech.glide:glide:4.16.0")
+          }
+          EOF
+
+      - name: Crear AndroidManifest y tema
+        run: |
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+              <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="true"
+                  android:requestLegacyExternalStorage="true"
+                  android:label="Video Flotante"
+                  android:theme="@style/AppTheme">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <activity
+                      android:name=".AlbumActivity"
+                      android:exported="false" />
+                  <activity
+                      android:name=".VideoPlayerActivity"
+                      android:exported="false"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize" />
+                  <service
+                      android:name=".FloatingVideoService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaPlayback" />
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/res/values/styles.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="Theme.MaterialComponents.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+                  <item name="android:colorBackground">@android:color/black</item>
+                  <item name="android:statusBarColor">@android:color/black</item>
+                  <item name="android:navigationBarColor">@android:color/black</item>
+              </style>
+          </resources>
+          EOF
+
+      - name: Crear Models.kt
+        run: |
+          cat << 'EOF' > app/src/main/java/com/multimediaplayer/Models.kt
+          package com.multimediaplayer
+
+          import android.Manifest
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.drawable.ColorDrawable
+          import android.os.Build
+          import android.os.Environment
+          import android.provider.MediaStore
+          import android.widget.ImageView
+          import androidx.core.content.ContextCompat
+          import com.bumptech.glide.Glide
+          import com.bumptech.glide.request.RequestOptions
+          import java.io.File
+
+          data class Album(
+              val folder: String,
+              val name: String,
+              val coverPath: String,
+              val count: Int
+          )
+
+          data class VideoItem(
+              val path: String,
+              val name: String
+          )
+
+          fun Context.dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+          // Miniatura de un video (toma un fotograma al segundo 1 para evitar el negro inicial)
+          fun loadThumb(view: ImageView, path: String) {
+              val options = RequestOptions()
+                  .frame(1000000L)
+                  .centerCrop()
+                  .placeholder(ColorDrawable(Color.parseColor("#1A1A1A")))
+              Glide.with(view)
+                  .load(File(path))
+                  .apply(options)
+                  .into(view)
+          }
+
+          object Prefs {
+              private const val FILE = "prefs"
+              private const val KEY_HIDDEN = "hidden"
+
+              fun hidden(ctx: Context): Boolean =
+                  ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_HIDDEN, false)
+
+              fun setHidden(ctx: Context, value: Boolean) {
+                  ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(KEY_HIDDEN, value).apply()
+              }
+          }
+
+          object VideoStore {
+
+              private val EXTENSIONS = setOf(
+                  "mp4", "mkv", "webm", "3gp", "avi", "mov", "m4v", "flv", "wmv", "mpg", "mpeg"
+              )
+
+              fun isVideoFile(f: File): Boolean = f.isFile && EXTENSIONS.contains(f.extension.lowercase())
+
+              // Permiso para leer archivos directamente (necesario para ver los ocultos)
+              fun hasFullAccess(ctx: Context): Boolean {
+                  return if (Build.VERSION.SDK_INT >= 30) {
+                      Environment.isExternalStorageManager()
+                  } else {
+                      ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                  }
+              }
+
+              // Todos los videos (para la lista de carpetas)
+              fun loadAll(ctx: Context, hidden: Boolean): List<VideoItem> {
+                  return if (hidden) scanDisk(ctx) else queryMediaStore(ctx, null)
+              }
+
+              // Videos de una sola carpeta
+              fun loadFolder(ctx: Context, folder: String, hidden: Boolean): List<VideoItem> {
+                  return if (hidden) listFolder(File(folder)) else queryMediaStore(ctx, folder)
+              }
+
+              private fun queryMediaStore(ctx: Context, folder: String?): List<VideoItem> {
+                  val list = mutableListOf<VideoItem>()
+                  val uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                  val projection = arrayOf(MediaStore.Video.Media.DATA)
+                  var selection: String? = null
+                  var args: Array<String>? = null
+                  if (folder != null) {
+                      selection = MediaStore.Video.Media.DATA + " LIKE ?"
+                      args = arrayOf("$folder/%")
+                  }
+                  try {
+                      val cursor = ctx.contentResolver.query(
+                          uri, projection, selection, args, MediaStore.Video.Media.DATE_ADDED + " DESC"
+                      )
+                      cursor?.use { c ->
+                          val col = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)
+                          while (c.moveToNext()) {
+                              val path = c.getString(col) ?: continue
+                              val f = File(path)
+                              if (folder != null && f.parent != folder) continue
+                              if (!f.exists()) continue
+                              list.add(VideoItem(path, f.name))
+                          }
+                      }
+                  } catch (e: Exception) {
+                      // sin resultados
+                  }
+                  return list
+              }
+
+              private fun listFolder(dir: File): List<VideoItem> {
+                  val files = dir.listFiles() ?: return emptyList()
+                  return files
+                      .filter { isVideoFile(it) }
+                      .sortedByDescending { it.lastModified() }
+                      .map { VideoItem(it.absolutePath, it.name) }
+              }
+
+              private fun scanDisk(ctx: Context): List<VideoItem> {
+                  val out = mutableListOf<VideoItem>()
+                  for (root in storageRoots(ctx)) {
+                      walk(root, 0, true, out)
+                  }
+                  return out
+              }
+
+              private fun walk(dir: File, depth: Int, isRoot: Boolean, out: MutableList<VideoItem>) {
+                  if (depth > 15) return
+                  val files = dir.listFiles() ?: return
+                  for (f in files) {
+                      if (f.isDirectory) {
+                          if (isRoot && f.name == "Android") continue
+                          walk(f, depth + 1, false, out)
+                      } else if (isVideoFile(f)) {
+                          out.add(VideoItem(f.absolutePath, f.name))
+                      }
+                  }
+              }
+
+              private fun storageRoots(ctx: Context): List<File> {
+                  val roots = mutableListOf<File>()
+                  roots.add(Environment.getExternalStorageDirectory())
+                  val dirs = ctx.getExternalFilesDirs(null)
+                  for (d in dirs) {
+                      if (d == null) continue
+                      val p = d.absolutePath
+                      val i = p.indexOf("/Android/")
+                      if (i > 0) {
+                          val r = File(p.substring(0, i))
+                          if (roots.none { it.absolutePath == r.absolutePath }) roots.add(r)
+                      }
+                  }
+                  return roots
+              }
+          }
+          EOF
+
+      - name: Crear Adapters.kt
+        run: |
+          cat << 'EOF' > app/src/main/java/com/multimediaplayer/Adapters.kt
+          package com.multimediaplayer
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.text.TextUtils
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import androidx.recyclerview.widget.RecyclerView
+
+          // Imagen cuadrada: el alto siempre es igual al ancho
+          class SquareImageView(context: Context) : ImageView(context) {
+              override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                  super.onMeasure(widthMeasureSpec, widthMeasureSpec)
+              }
+          }
+
+          class CardHolder(
+              val card: LinearLayout,
+              val img: ImageView,
+              val title: TextView,
+              val sub: TextView
+          ) : RecyclerView.ViewHolder(card)
+
+          private fun makeCard(ctx: Context, titleSize: Float): CardHolder {
+              val margin = ctx.dp(4)
+
+              val card = LinearLayout(ctx)
+              card.orientation = LinearLayout.VERTICAL
+              card.setBackgroundColor(Color.parseColor("#111111"))
+              val cardParams = RecyclerView.LayoutParams(
+                  ViewGroup.LayoutParams.MATCH_PARENT,
+                  ViewGroup.LayoutParams.WRAP_CONTENT
+              )
+              cardParams.setMargins(margin, margin, margin, margin)
+              card.layoutParams = cardParams
+
+              val img = SquareImageView(ctx)
+              img.scaleType = ImageView.ScaleType.CENTER_CROP
+              img.layoutParams = LinearLayout.LayoutParams(
+                  ViewGroup.LayoutParams.MATCH_PARENT,
+                  ViewGroup.LayoutParams.WRAP_CONTENT
+              )
+
+              val title = TextView(ctx)
+              title.setTextColor(Color.WHITE)
+              title.textSize = titleSize
+              title.maxLines = 2
+              title.ellipsize = TextUtils.TruncateAt.END
+              title.setPadding(ctx.dp(6), ctx.dp(6), ctx.dp(6), ctx.dp(6))
+
+              val sub = TextView(ctx)
+              sub.setTextColor(Color.parseColor("#888888"))
+              sub.textSize = 12f
+              sub.setPadding(ctx.dp(6), 0, ctx.dp(6), ctx.dp(6))
+
+              card.addView(img)
+              card.addView(title)
+              card.addView(sub)
+              return CardHolder(card, img, title, sub)
+          }
+
+          class AlbumAdapter(
+              private val items: List<Album>,
+              private val onClick: (Album) -> Unit
+          ) : RecyclerView.Adapter<CardHolder>() {
+
+              override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CardHolder {
+                  return makeCard(parent.context, 14f)
+              }
+
+              override fun getItemCount(): Int = items.size
+
+              override fun onBindViewHolder(holder: CardHolder, position: Int) {
+                  val album = items[position]
+                  holder.title.text = album.name
+                  holder.sub.visibility = View.VISIBLE
+                  holder.sub.text = if (album.count == 1) "1 video" else "${album.count} videos"
+                  loadThumb(holder.img, album.coverPath)
+                  holder.card.setOnClickListener { onClick(album) }
+              }
+          }
+
+          class VideoAdapter(
+              private val items: List<VideoItem>,
+              private val onClick: (VideoItem) -> Unit
+          ) : RecyclerView.Adapter<CardHolder>() {
+
+              override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CardHolder {
+                  return makeCard(parent.context, 11f)
+              }
+
+              override fun getItemCount(): Int = items.size
+
+              override fun onBindViewHolder(holder: CardHolder, position: Int) {
+                  val video = items[position]
+                  holder.title.text = video.name
+                  holder.sub.visibility = View.GONE
+                  loadThumb(holder.img, video.path)
+                  holder.card.setOnClickListener { onClick(video) }
+              }
+          }
+          EOF
+
+      - name: Crear MainActivity
+        run: |
+          cat << 'EOF' > app/src/main/java/com/multimediaplayer/MainActivity.kt
+          package com.multimediaplayer
+
+          import android.Manifest
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.LinearLayout
+          import android.widget.PopupMenu
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+          import androidx.recyclerview.widget.GridLayoutManager
+          import androidx.recyclerview.widget.RecyclerView
+          import java.io.File
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var status: TextView
+              private lateinit var albumAdapter: AlbumAdapter
+              private val albums = mutableListOf<Album>()
+              private var showHidden = false
+              private var wantHidden = false
+              private var loadId = 0
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  showHidden = Prefs.hidden(this)
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(Color.BLACK)
+
+                  // Barra superior: título y menú de tres puntos
+                  val toolbar = LinearLayout(this)
+                  toolbar.orientation = LinearLayout.HORIZONTAL
+                  toolbar.gravity = Gravity.CENTER_VERTICAL
+                  toolbar.setPadding(dp(16), dp(12), dp(8), dp(12))
+
+                  val title = TextView(this)
+                  title.text = "Videos"
+                  title.setTextColor(Color.WHITE)
+                  title.textSize = 20f
+                  title.setTypeface(null, Typeface.BOLD)
+                  title.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                  toolbar.addView(title)
+
+                  val menuButton = TextView(this)
+                  menuButton.text = "⋮"
+                  menuButton.setTextColor(Color.WHITE)
+                  menuButton.textSize = 26f
+                  menuButton.gravity = Gravity.CENTER
+                  menuButton.setPadding(dp(16), dp(4), dp(16), dp(4))
+                  menuButton.setOnClickListener { showMenu(it) }
+                  toolbar.addView(menuButton)
+
+                  root.addView(toolbar)
+
+                  status = TextView(this)
+                  status.setTextColor(Color.parseColor("#888888"))
+                  status.textSize = 14f
+                  status.gravity = Gravity.CENTER
+                  status.setPadding(dp(16), dp(24), dp(16), dp(24))
+                  status.visibility = View.GONE
+                  root.addView(status)
+
+                  albumAdapter = AlbumAdapter(albums) { album ->
+                      val intent = Intent(this, AlbumActivity::class.java)
+                      intent.putExtra("folder", album.folder)
+                      startActivity(intent)
+                  }
+
+                  val recycler = RecyclerView(this)
+                  recycler.layoutManager = GridLayoutManager(this, 2)
+                  recycler.adapter = albumAdapter
+                  recycler.clipToPadding = false
+                  recycler.setPadding(dp(4), dp(4), dp(4), dp(4))
+                  recycler.layoutParams = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      0,
+                      1f
+                  )
+                  root.addView(recycler)
+
+                  setContentView(root)
+
+                  if (!hasVideoPermission()) {
+                      askPermissions()
+                  }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+
+                  // Regreso de la pantalla de ajustes de "acceso a todos los archivos"
+                  if (wantHidden) {
+                      wantHidden = false
+                      if (VideoStore.hasFullAccess(this)) {
+                          showHidden = true
+                          Prefs.setHidden(this, true)
+                      } else {
+                          Toast.makeText(this, "No se activó el acceso a todos los archivos", Toast.LENGTH_LONG).show()
+                      }
+                  }
+
+                  // Si se quitó el permiso, se apaga la opción de ocultos
+                  if (showHidden && !VideoStore.hasFullAccess(this)) {
+                      showHidden = false
+                      Prefs.setHidden(this, false)
+                  }
+
+                  if (hasVideoPermission()) {
+                      loadAlbums()
+                  } else {
+                      showStatus("Falta el permiso para ver tus videos")
+                  }
+              }
+
+              private fun hasVideoPermission(): Boolean {
+                  val permission = if (Build.VERSION.SDK_INT >= 33) {
+                      Manifest.permission.READ_MEDIA_VIDEO
+                  } else {
+                      Manifest.permission.READ_EXTERNAL_STORAGE
+                  }
+                  return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+              }
+
+              private fun askPermissions() {
+                  val list = mutableListOf<String>()
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      list.add(Manifest.permission.READ_MEDIA_VIDEO)
+                      list.add(Manifest.permission.POST_NOTIFICATIONS)
+                  } else {
+                      list.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                  }
+                  ActivityCompat.requestPermissions(this, list.toTypedArray(), 100)
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int,
+                  permissions: Array<out String>,
+                  grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (!hasVideoPermission()) {
+                      Toast.makeText(this, "Permiso necesario para ver tus videos", Toast.LENGTH_LONG).show()
+                  }
+              }
+
+              private fun showMenu(anchor: View) {
+                  val popup = PopupMenu(this, anchor)
+                  val item = popup.menu.add("Mostrar archivos ocultos")
+                  item.isCheckable = true
+                  item.isChecked = showHidden && VideoStore.hasFullAccess(this)
+                  popup.setOnMenuItemClickListener {
+                      toggleHidden()
+                      true
+                  }
+                  popup.show()
+              }
+
+              private fun toggleHidden() {
+                  if (showHidden) {
+                      showHidden = false
+                      Prefs.setHidden(this, false)
+                      loadAlbums()
+                      return
+                  }
+                  if (VideoStore.hasFullAccess(this)) {
+                      showHidden = true
+                      Prefs.setHidden(this, true)
+                      loadAlbums()
+                  } else {
+                      askFullAccess()
+                  }
+              }
+
+              private fun askFullAccess() {
+                  wantHidden = true
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      Toast.makeText(this, "Activa el acceso a todos los archivos y regresa", Toast.LENGTH_LONG).show()
+                      try {
+                          startActivity(
+                              Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
+                          )
+                      } catch (e: Exception) {
+                          startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                      }
+                  } else {
+                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 100)
+                  }
+              }
+
+              private fun showStatus(message: String?) {
+                  if (message == null) {
+                      status.visibility = View.GONE
+                  } else {
+                      status.text = message
+                      status.visibility = View.VISIBLE
+                  }
+              }
+
+              private fun loadAlbums() {
+                  val myId = ++loadId
+                  val hidden = showHidden && VideoStore.hasFullAccess(this)
+                  val appContext = applicationContext
+                  showStatus("Buscando videos...")
+
+                  Thread {
+                      val videos = VideoStore.loadAll(appContext, hidden)
+                      val grouped = videos.groupBy { File(it.path).parent ?: "" }
+                      val result = grouped
+                          .map { entry -> Album(entry.key, File(entry.key).name, entry.value[0].path, entry.value.size) }
+                          .sortedBy { it.name.lowercase() }
+
+                      runOnUiThread {
+                          if (myId != loadId || isFinishing || isDestroyed) return@runOnUiThread
+                          albums.clear()
+                          albums.addAll(result)
+                          albumAdapter.notifyDataSetChanged()
+                          if (result.isEmpty()) {
+                              showStatus("No se encontraron videos")
+                          } else {
+                              showStatus(null)
+                          }
+                      }
+                  }.start()
+              }
+          }
+          EOF
+
+      - name: Crear AlbumActivity
+        run: |
+          cat << 'EOF' > app/src/main/java/com/multimediaplayer/AlbumActivity.kt
+          package com.multimediaplayer
+
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.os.Bundle
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.recyclerview.widget.GridLayoutManager
+          import androidx.recyclerview.widget.RecyclerView
+          import java.io.File
+
+          class AlbumActivity : AppCompatActivity() {
+
+              private lateinit var status: TextView
+              private lateinit var videoAdapter: VideoAdapter
+              private val videos = mutableListOf<VideoItem>()
+              private var folder = ""
+              private var loadId = 0
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  folder = intent.getStringExtra("folder") ?: ""
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(Color.BLACK)
+
+                  val toolbar = LinearLayout(this)
+                  toolbar.orientation = LinearLayout.HORIZONTAL
+                  toolbar.gravity = Gravity.CENTER_VERTICAL
+                  toolbar.setPadding(dp(8), dp(12), dp(16), dp(12))
+
+                  val back = TextView(this)
+                  back.text = "←"
+                  back.setTextColor(Color.WHITE)
+                  back.textSize = 24f
+                  back.setPadding(dp(12), 0, dp(16), 0)
+                  back.setOnClickListener { finish() }
+                  toolbar.addView(back)
+
+                  val title = TextView(this)
+                  title.text = File(folder).name
+                  title.setTextColor(Color.WHITE)
+                  title.textSize = 18f
+                  title.setTypeface(null, Typeface.BOLD)
+                  title.maxLines = 1
+                  title.ellipsize = TextUtils.TruncateAt.END
+                  toolbar.addView(title)
+
+                  root.addView(toolbar)
+
+                  status = TextView(this)
+                  status.setTextColor(Color.parseColor("#888888"))
+                  status.textSize = 14f
+                  status.gravity = Gravity.CENTER
+                  status.setPadding(dp(16), dp(24), dp(16), dp(24))
+                  status.visibility = View.GONE
+                  root.addView(status)
+
+                  videoAdapter = VideoAdapter(videos) { video ->
+                      val intent = Intent(this, VideoPlayerActivity::class.java)
+                      intent.putExtra("video_path", video.path)
+                      startActivity(intent)
+                  }
+
+                  val recycler = RecyclerView(this)
+                  recycler.layoutManager = GridLayoutManager(this, 3)
+                  recycler.adapter = videoAdapter
+                  recycler.clipToPadding = false
+                  recycler.setPadding(dp(4), dp(4), dp(4), dp(4))
+                  recycler.layoutParams = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      0,
+                      1f
+                  )
+                  root.addView(recycler)
+
+                  setContentView(root)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  loadVideos()
+              }
+
+              private fun loadVideos() {
+                  val myId = ++loadId
+                  val hidden = Prefs.hidden(this) && VideoStore.hasFullAccess(this)
+                  val appContext = applicationContext
+                  val currentFolder = folder
+
+                  Thread {
+                      val list = VideoStore.loadFolder(appContext, currentFolder, hidden)
+
+                      runOnUiThread {
+                          if (myId != loadId || isFinishing || isDestroyed) return@runOnUiThread
+                          videos.clear()
+                          videos.addAll(list)
+                          videoAdapter.notifyDataSetChanged()
+                          if (list.isEmpty()) {
+                              status.text = "No hay videos en esta carpeta"
+                              status.visibility = View.VISIBLE
+                          } else {
+                              status.visibility = View.GONE
+                          }
+                      }
+                  }.start()
+              }
+          }
+          EOF
+
+      - name: Crear VideoPlayerActivity
+        run: |
+          cat << 'EOF' > app/src/main/java/com/multimediaplayer/VideoPlayerActivity.kt
+          package com.multimediaplayer
+
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.media.MediaPlayer
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.WindowManager
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import android.widget.VideoView
+          import androidx.appcompat.app.AppCompatActivity
+
+          class VideoPlayerActivity : AppCompatActivity() {
+
+              private lateinit var videoView: VideoView
+              private lateinit var controls: LinearLayout
+              private lateinit var btnPlay: TextView
+              private lateinit var btnLoop: TextView
+              private var player: MediaPlayer? = null
+              private var looping = true
+              private var controlsVisible = true
+              private var resumePos = 0
+              private var resumePlaying = true
+              private var videoPath = ""
+
+              private companion object {
+                  const val PLAY = "▶"
+                  const val PAUSE = "❚❚"
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  videoPath = intent.getStringExtra("video_path") ?: ""
+
+                  val root = FrameLayout(this)
+                  root.setBackgroundColor(Color.BLACK)
+                  root.setOnClickListener { toggleControls() }
+
+                  videoView = VideoView(this)
+                  videoView.layoutParams = FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      Gravity.CENTER
+                  )
+                  videoView.setOnPreparedListener { mp ->
+                      player = mp
+                      mp.isLooping = looping
+                      if (resumePos > 0) {
+                          videoView.seekTo(resumePos)
+                      }
+                      if (resumePlaying) {
+                          videoView.start()
+                          btnPlay.text = PAUSE
+                      } else {
+                          btnPlay.text = PLAY
+                      }
+                  }
+                  videoView.setOnCompletionListener {
+                      btnPlay.text = PLAY
+                  }
+                  videoView.setOnErrorListener { _, _, _ ->
+                      Toast.makeText(this, "No se puede reproducir este video", Toast.LENGTH_LONG).show()
+                      true
+                  }
+                  videoView.setVideoPath(videoPath)
+                  root.addView(videoView)
+
+                  // Controles transparentes abajo
+                  controls = LinearLayout(this)
+                  controls.orientation = LinearLayout.HORIZONTAL
+                  controls.gravity = Gravity.CENTER
+                  controls.setBackgroundColor(Color.parseColor("#66000000"))
+                  controls.layoutParams = FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      dp(80),
+                      Gravity.BOTTOM
+                  )
+
+                  btnPlay = makeButton(PAUSE) {
+                      if (videoView.isPlaying) {
+                          videoView.pause()
+                          btnPlay.text = PLAY
+                      } else {
+                          videoView.start()
+                          btnPlay.text = PAUSE
+                      }
+                  }
+
+                  btnLoop = makeButton("Bucle") {
+                      looping = !looping
+                      btnLoop.alpha = if (looping) 1f else 0.4f
+                      try {
+                          player?.isLooping = looping
+                      } catch (e: Exception) {
+                          // el reproductor se está reiniciando; se aplica al preparar
+                      }
+                      Toast.makeText(
+                          this,
+                          if (looping) "Bucle activado" else "Bucle desactivado",
+                          Toast.LENGTH_SHORT
+                      ).show()
+                  }
+
+                  val btnFloat = makeButton("Flotar") { startFloating() }
+
+                  controls.addView(btnPlay)
+                  controls.addView(btnLoop)
+                  controls.addView(btnFloat)
+                  root.addView(controls)
+
+                  setContentView(root)
+              }
+
+              private fun makeButton(label: String, onClick: () -> Unit): TextView {
+                  val button = TextView(this)
+                  button.text = label
+                  button.setTextColor(Color.WHITE)
+                  button.textSize = 16f
+                  button.gravity = Gravity.CENTER
+                  button.minWidth = dp(64)
+                  button.setPadding(dp(16), dp(10), dp(16), dp(10))
+
+                  val lp = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT
+                  )
+                  lp.setMargins(dp(8), 0, dp(8), 0)
+                  button.layoutParams = lp
+
+                  val shape = GradientDrawable()
+                  shape.setCornerRadius(dp(24).toFloat())
+                  shape.setColor(Color.parseColor("#55000000"))
+                  shape.setStroke(dp(1), Color.parseColor("#888888"))
+                  button.background = shape
+
+                  button.setOnClickListener { onClick() }
+                  return button
+              }
+
+              private fun toggleControls() {
+                  controlsVisible = !controlsVisible
+                  controls.visibility = if (controlsVisible) View.VISIBLE else View.GONE
+              }
+
+              private fun startFloating() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "Activa Mostrar sobre otras apps y vuelve a tocar Flotar", Toast.LENGTH_LONG).show()
+                      startActivity(
+                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                      )
+                      return
+                  }
+                  val intent = Intent(this, FloatingVideoService::class.java)
+                  intent.putExtra("video_path", videoPath)
+                  intent.putExtra("position", videoView.currentPosition)
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      startForegroundService(intent)
+                  } else {
+                      startService(intent)
+                  }
+                  finish()
+              }
+
+              // Al salir de la app el VideoView se reinicia; se guarda dónde iba
+              override fun onPause() {
+                  super.onPause()
+                  resumePos = videoView.currentPosition
+                  resumePlaying = videoView.isPlaying
+              }
+          }
+          EOF
+
+      - name: Crear FloatingVideoService
+        run: |
+          cat << 'EOF' > app/src/main/java/com/multimediaplayer/FloatingVideoService.kt
+          package com.multimediaplayer
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Build
+          import android.os.IBinder
+          import android.util.DisplayMetrics
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.ViewGroup
+          import android.view.WindowManager
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import android.widget.VideoView
+          import androidx.core.app.NotificationCompat
+
+          class FloatingVideoService : Service() {
+
+              private var windowManager: WindowManager? = null
+              private var floatingView: FrameLayout? = null
+              private var videoView: VideoView? = null
+              private var btnPlay: TextView? = null
+              private var params: WindowManager.LayoutParams? = null
+
+              private var startPos = 0
+              private var startX = 0
+              private var startY = 0
+              private var touchX = 0f
+              private var touchY = 0f
+
+              private companion object {
+                  const val PLAY = "▶"
+                  const val PAUSE = "❚❚"
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+                  startForegroundNotification()
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val path = intent?.getStringExtra("video_path") ?: ""
+                  if (path.isEmpty()) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  startPos = intent?.getIntExtra("position", 0) ?: 0
+                  if (floatingView == null) {
+                      showFloatingWindow()
+                  }
+                  videoView?.setVideoPath(path)
+                  return START_NOT_STICKY
+              }
+
+              private fun startForegroundNotification() {
+                  val channelId = "floating_video_channel"
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      val channel = NotificationChannel(
+                          channelId,
+                          "Reproductor flotante",
+                          NotificationManager.IMPORTANCE_LOW
+                      )
+                      val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                      manager.createNotificationChannel(channel)
+                  }
+                  val notification: Notification = NotificationCompat.Builder(this, channelId)
+                      .setContentTitle("Reproductor flotante activo")
+                      .setContentText("Reproduciendo video en ventana flotante")
+                      .setSmallIcon(android.R.drawable.ic_media_play)
+                      .setOngoing(true)
+                      .build()
+                  startForeground(1, notification)
+              }
+
+              private fun showFloatingWindow() {
+                  val wm = windowManager ?: return
+
+                  val windowType = if (Build.VERSION.SDK_INT >= 26) {
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                  } else {
+                      WindowManager.LayoutParams.TYPE_PHONE
+                  }
+
+                  val lp = WindowManager.LayoutParams(
+                      dp(260),
+                      dp(160),
+                      windowType,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(24)
+                  lp.y = dp(120)
+                  params = lp
+
+                  val root = FrameLayout(this)
+                  root.setBackgroundColor(Color.BLACK)
+
+                  val vv = VideoView(this)
+                  vv.layoutParams = FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      Gravity.CENTER
+                  )
+                  vv.setOnPreparedListener { mp ->
+                      mp.isLooping = true
+                      if (startPos > 0) {
+                          vv.seekTo(startPos)
+                          startPos = 0
+                      }
+                      vv.start()
+                      btnPlay?.text = PAUSE
+                  }
+                  vv.setOnErrorListener { _, _, _ ->
+                      Toast.makeText(this, "No se puede reproducir este video", Toast.LENGTH_LONG).show()
+                      stopSelf()
+                      true
+                  }
+                  root.addView(vv)
+
+                  // Barra de botones: play/pausa, detener, cerrar
+                  val bar = LinearLayout(this)
+                  bar.orientation = LinearLayout.HORIZONTAL
+                  bar.gravity = Gravity.CENTER
+                  bar.setBackgroundColor(Color.parseColor("#99000000"))
+                  bar.layoutParams = FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      dp(44),
+                      Gravity.BOTTOM
+                  )
+
+                  val play = makeButton(PAUSE, "#444444") { togglePlay() }
+                  val stop = makeButton("■", "#444444") { rewindAndPause() }
+                  val close = makeButton("X", "#B71C1C") { stopSelf() }
+                  btnPlay = play
+
+                  bar.addView(play)
+                  bar.addView(stop)
+                  bar.addView(close)
+                  root.addView(bar)
+
+                  // Arrastrar la ventana con el dedo hacia cualquier lado de la pantalla
+                  root.setOnTouchListener { _, event -> onDrag(event) }
+
+                  floatingView = root
+                  videoView = vv
+
+                  try {
+                      wm.addView(root, lp)
+                  } catch (e: Exception) {
+                      floatingView = null
+                      videoView = null
+                      Toast.makeText(this, "No se pudo mostrar la ventana flotante", Toast.LENGTH_LONG).show()
+                      stopSelf()
+                  }
+              }
+
+              private fun makeButton(label: String, color: String, onClick: () -> Unit): TextView {
+                  val button = TextView(this)
+                  button.text = label
+                  button.setTextColor(Color.WHITE)
+                  button.textSize = 14f
+                  button.gravity = Gravity.CENTER
+
+                  val lp = LinearLayout.LayoutParams(dp(48), dp(34))
+                  lp.setMargins(dp(6), 0, dp(6), 0)
+                  button.layoutParams = lp
+
+                  val shape = GradientDrawable()
+                  shape.setCornerRadius(dp(17).toFloat())
+                  shape.setColor(Color.parseColor(color))
+                  button.background = shape
+
+                  button.setOnClickListener { onClick() }
+                  return button
+              }
+
+              private fun togglePlay() {
+                  val v = videoView ?: return
+                  if (v.isPlaying) {
+                      v.pause()
+                      btnPlay?.text = PLAY
+                  } else {
+                      v.start()
+                      btnPlay?.text = PAUSE
+                  }
+              }
+
+              private fun rewindAndPause() {
+                  val v = videoView ?: return
+                  v.pause()
+                  v.seekTo(0)
+                  btnPlay?.text = PLAY
+              }
+
+              private fun onDrag(event: MotionEvent): Boolean {
+                  val p = params ?: return false
+                  val view = floatingView ?: return false
+
+                  if (event.action == MotionEvent.ACTION_DOWN) {
+                      startX = p.x
+                      startY = p.y
+                      touchX = event.rawX
+                      touchY = event.rawY
+                  } else if (event.action == MotionEvent.ACTION_MOVE) {
+                      val size = screenSize()
+                      val maxX = maxOf(0, size.first - p.width)
+                      val maxY = maxOf(0, size.second - p.height)
+                      p.x = (startX + (event.rawX - touchX)).toInt().coerceIn(0, maxX)
+                      p.y = (startY + (event.rawY - touchY)).toInt().coerceIn(0, maxY)
+                      try {
+                          windowManager?.updateViewLayout(view, p)
+                      } catch (e: Exception) {
+                          // la ventana ya no existe
+                      }
+                  }
+                  return true
+              }
+
+              @Suppress("DEPRECATION")
+              private fun screenSize(): Pair<Int, Int> {
+                  val metrics = DisplayMetrics()
+                  windowManager?.defaultDisplay?.getRealMetrics(metrics)
+                  return Pair(metrics.widthPixels, metrics.heightPixels)
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  try {
+                      videoView?.stopPlayback()
+                      val view = floatingView
+                      if (view != null) {
+                          windowManager?.removeView(view)
+                      }
+                  } catch (e: Exception) {
+                      // ya estaba cerrada
+                  }
+                  floatingView = null
+                  videoView = null
+              }
+          }
+          EOF
+
+      - name: Compilar APK
+        run: |
+          gradle clean assembleDebug --no-daemon --stacktrace
+
+      - name: Subir APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoFlotante-${{ github.sha }}
+          path: app/build/outputs/apk/debug/app-debug.apk
